@@ -4,13 +4,19 @@ import Foundation
 /// The public entry point: configure once at launch, then track events from any thread.
 public enum SimpleDataLogs: Sendable {
     /// This SDK's version, sent in every User-Agent.
-    public static let sdkVersion = "0.3.0"
+    public static let sdkVersion = "0.4.0"
 
     /// The production ingest host.
     public static let defaultEndpoint = URL(string: "https://edge.simpledatalogs.com")!
 
     /// The longest app termination is held so events tracked during it reach the journal.
     static let terminationJournalWaitLimit = DispatchTimeInterval.seconds(1)
+
+    /// The longest app termination is held in total, journal and last send together.
+    static let terminationFlushWaitLimit = DispatchTimeInterval.seconds(2)
+
+    /// The default time `flushAndDisable` gives the last send before it deletes what is left.
+    public static let defaultFlushAndDisableTimeLimit: Duration = .seconds(10)
 
     /// The facade's settings and the pipeline's command inbox, behind one lock.
     private static let facadeState = OSAllocatedUnfairLock(initialState: FacadeState())
@@ -21,7 +27,13 @@ public enum SimpleDataLogs: Sendable {
     private static let autocaptureController = OSAllocatedUnfairLock<AutocaptureController?>(initialState: nil)
 
     /// Starts the SDK; call once at launch, after `setEnabled(_:)` if the user may have opted out; `autocapture: .all` sends launches, sessions and crashes.
-    public static func configure(ingestKey: String, endpoint: URL = defaultEndpoint, autocapture: AutocaptureOptions = []) {
+    public static func configure(
+        ingestKey: String,
+        endpoint: URL = defaultEndpoint,
+        autocapture: AutocaptureOptions = [],
+        sessionMode: SessionMode = .activation,
+        crashReasonRedaction: CrashReasonRedaction = .verbatim
+    ) {
         // Trim copy-paste whitespace, and warn about a key that cannot work in an app.
         let trimmedIngestKey = ingestKey.trimmingCharacters(in: .whitespacesAndNewlines)
         warnAboutSuspiciousKey(trimmedIngestKey)
@@ -67,7 +79,12 @@ public enum SimpleDataLogs: Sendable {
         }
 
         // Opt-in autocapture: launches, sessions and crashes, as asked.
-        startAutocapture(autocapture, storageDirectory: configuration.storageDirectory)
+        startAutocapture(
+            autocapture,
+            storageDirectory: configuration.storageDirectory,
+            sessionMode: sessionMode,
+            crashReasonRedaction: crashReasonRedaction
+        )
     }
 
     /// Records a screen view (`screen_view` with a `screen` prop); call it when a screen appears, or use the SwiftUI `trackScreenView(_:)` modifier.
@@ -77,6 +94,21 @@ public enum SimpleDataLogs: Sendable {
 
     /// Records one event; it returns at once, and never throws or blocks the caller.
     public static func track(_ eventName: String, properties: [String: PropertyValue] = [:]) {
+        queueHostEvent(eventName, properties: properties, requestedTimestamp: nil, eventID: nil)
+    }
+
+    /// Records one event that happened at `timestamp`, e.g. a step saved before consent; up to 3,650 days back, and a future time counts as now.
+    public static func track(_ eventName: String, properties: [String: PropertyValue] = [:], at timestamp: Date, eventID: UUID? = nil) {
+        queueHostEvent(eventName, properties: properties, requestedTimestamp: timestamp, eventID: eventID)
+    }
+
+    /// Records one event now with your own `eventID`, so sending the same event twice counts it once.
+    public static func track(_ eventName: String, properties: [String: PropertyValue] = [:], eventID: UUID) {
+        queueHostEvent(eventName, properties: properties, requestedTimestamp: nil, eventID: eventID)
+    }
+
+    /// Validates and stamps one event from the host app, then queues it in call order.
+    private static func queueHostEvent(_ eventName: String, properties: [String: PropertyValue], requestedTimestamp: Date?, eventID: UUID?) {
         // An empty name cannot become an event.
         guard !eventName.isEmpty else {
             SDKLog.facade.error("track(_:properties:) was called with an empty event name; event dropped")
@@ -86,8 +118,19 @@ public enum SimpleDataLogs: Sendable {
         // Drop NaN and infinity before the event is stamped.
         let validProperties = properties.droppingNonJSONValues()
 
-        // Stamp event_id and ts now, when the event happens, and queue it in call order, within the pending-track cap.
-        let occurredAt = Date()
+        // Stamp ts now, or at the caller's time when it fits the ingest API's window.
+        guard let occurredAt = TrackedEvent.resolvedTimestamp(requestedTimestamp) else {
+            SDKLog.facade.error("track(\(eventName, privacy: .public), at:) was given a time more than 3,650 days ago; event dropped")
+            return
+        }
+
+        // An event happening now is session activity in inactivity-timeout mode; a back-dated one is not.
+        if requestedTimestamp == nil, facadeState.withLock({ state in state.isEnabled }) {
+            runningAutocaptureController()?.recordTrackActivity(at: occurredAt)
+        }
+
+        // Queue it in call order, within the pending-track cap, with the caller's event_id or a fresh one.
+        let resolvedEventID = eventID ?? UUID()
         let queueResult = queueTrack { state in
             guard state.isEnabled else {
                 return nil
@@ -99,7 +142,8 @@ public enum SimpleDataLogs: Sendable {
                 defaultProperties: state.defaultProperties,
                 deviceID: state.deviceID,
                 sessionID: state.sessionID,
-                occurredAt: occurredAt
+                occurredAt: occurredAt,
+                eventID: resolvedEventID
             )
             return .track(event)
         }
@@ -143,8 +187,18 @@ public enum SimpleDataLogs: Sendable {
         }
     }
 
+    /// The autocapture controller, once `configure` started one.
+    private static func runningAutocaptureController() -> AutocaptureController? {
+        autocaptureController.withLock { runningController in runningController }
+    }
+
     /// Starts the autocapture controller once, wired to the facade.
-    private static func startAutocapture(_ options: AutocaptureOptions, storageDirectory: URL) {
+    private static func startAutocapture(
+        _ options: AutocaptureOptions,
+        storageDirectory: URL,
+        sessionMode: SessionMode,
+        crashReasonRedaction: CrashReasonRedaction
+    ) {
         guard !options.isEmpty else {
             return
         }
@@ -152,6 +206,8 @@ public enum SimpleDataLogs: Sendable {
         let controller = AutocaptureController(
             options: options,
             stateDirectory: storageDirectory,
+            sessionMode: sessionMode,
+            crashReasonRedaction: crashReasonRedaction,
             emit: { eventName, properties, occurredAt, sessionID in
                 trackAutocaptured(eventName, properties: properties, occurredAt: occurredAt, sessionID: sessionID)
             },
@@ -190,17 +246,60 @@ public enum SimpleDataLogs: Sendable {
         }
     }
 
+    /// Turns collection off and deletes every event not yet delivered; the same as `setEnabled(false)`.
+    public static func disable() {
+        setEnabled(false)
+    }
+
     /// Sends everything tracked so far; returns when that attempt ends, keeping anything undelivered on disk.
     public static func flush() async {
         await withCheckedContinuation { (flushContinuation: CheckedContinuation<Void, Never>) in
             let queueResult = queueCommand { state in
-                state.isEnabled ? .flush(flushContinuation) : nil
+                state.isEnabled ? .flush(completion: { flushContinuation.resume() }) : nil
             }
 
             // Nothing was queued, so nothing would resume the caller later.
             if queueResult != .queued {
                 flushContinuation.resume()
             }
+        }
+    }
+
+    /// Ignores new events at once, sends what is queued within `timeLimit`, then turns collection off and deletes whatever is left.
+    public static func flushAndDisable(timeLimit: Duration = defaultFlushAndDisableTimeLimit) async {
+        await withCheckedContinuation { (drainContinuation: CheckedContinuation<Void, Never>) in
+            flushAndDisable(timeLimit: timeLimit) {
+                drainContinuation.resume()
+            }
+        }
+    }
+
+    /// The callback form of `flushAndDisable(timeLimit:)`; `completion` runs once collection is off, on a background thread.
+    public static func flushAndDisable(timeLimit: Duration = defaultFlushAndDisableTimeLimit, completion: (@Sendable () -> Void)?) {
+        // New events are ignored from this call on; the pipeline drains what came before it, then deletes the rest.
+        let queueResult = facadeState.withLock { state in
+            let wasEnabled = state.isEnabled
+            state.isEnabled = false
+
+            guard let commandContinuation = state.commandContinuation else {
+                return CommandQueueResult.notConfigured
+            }
+
+            // Already off: the pipeline only needs to hear it, and there is nothing to send.
+            let command: PipelineCommand = wasEnabled
+                ? .flushAndDisable(timeLimit: timeLimit, completion: completion)
+                : .setEnabled(false)
+
+            guard case .enqueued = commandContinuation.yield(command) else {
+                return CommandQueueResult.skipped
+            }
+
+            return wasEnabled ? CommandQueueResult.queued : CommandQueueResult.skipped
+        }
+
+        // Without a queued drain, nothing would call the completion later.
+        if queueResult != .queued {
+            completion?()
         }
     }
 
@@ -223,22 +322,59 @@ public enum SimpleDataLogs: Sendable {
         endpoint.appending(path: "v1/ingest", directoryHint: .notDirectory)
     }
 
-    /// Flushes on every lifecycle moment; on termination it also holds the app up to 1 s until queued events are journaled.
+    /// Flushes on every lifecycle moment; on termination it holds the app up to 1 s for the journal and up to 2 s in all for the last send.
     static func handleLifecycleMoment(_ lifecycleMoment: LifecycleMoment) {
-        // From termination on, every track call also waits for its own journal write, within one shared deadline.
-        if lifecycleMoment == .terminating {
-            facadeState.withLock { state in
-                state.terminationDeadline = state.terminationDeadline ?? (DispatchTime.now() + terminationJournalWaitLimit)
-            }
+        // Save the session's last activity, so the next launch ends it at the right time.
+        runningAutocaptureController()?.persistSession()
+
+        guard lifecycleMoment == .terminating else {
+            startBackgroundFlush()
+            return
         }
 
-        // Start a last send; whatever does not make it stays on disk for the next launch.
-        _ = queueCommand { state in
-            state.isEnabled ? .flush(nil) : nil
+        // From termination on, every track call also waits for its own journal write, within one shared deadline.
+        let terminationStartedAt = DispatchTime.now()
+        facadeState.withLock { state in
+            state.terminationDeadline = state.terminationDeadline ?? (terminationStartedAt + terminationJournalWaitLimit)
         }
 
         // Hold termination until everything queued so far is on disk.
         waitForJournalIfTerminating()
+
+        // Then give the last send a short, bounded chance; whatever does not make it stays on disk for the next launch.
+        let didFlushInTime = performBoundedFlush(until: terminationStartedAt + terminationFlushWaitLimit) { flushCommand in
+            queueCommand { state in state.isEnabled ? flushCommand : nil } == .queued
+        }
+
+        if !didFlushInTime {
+            SDKLog.facade.notice("The last send did not finish before the app quit; undelivered events go out on the next launch")
+        }
+    }
+
+    /// Queues a flush through `queueFlush` and blocks until it ends or `deadline` passes; returns true when it ended in time.
+    static func performBoundedFlush(until deadline: DispatchTime, queueFlush: (PipelineCommand) -> Bool) -> Bool {
+        let flushFinished = DispatchSemaphore(value: 0)
+
+        // Nothing queued (opted out, or not configured) means nothing to wait for.
+        guard queueFlush(.flush(completion: { flushFinished.signal() })) else {
+            return true
+        }
+
+        return flushFinished.wait(timeout: deadline) == .success
+    }
+
+    /// Starts a last send without blocking; on iOS it asks for background time until the send ends.
+    private static func startBackgroundFlush() {
+        let backgroundTime = BackgroundTimeRequest.begin()
+
+        let queueResult = queueCommand { state in
+            state.isEnabled ? .flush(completion: { backgroundTime?.end() }) : nil
+        }
+
+        // Nothing was queued, so nothing would give the background time back later.
+        if queueResult != .queued {
+            backgroundTime?.end()
+        }
     }
 
     /// During termination, blocks until every queued event is journaled or the deadline passes; otherwise returns at once.

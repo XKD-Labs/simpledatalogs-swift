@@ -35,10 +35,17 @@ final class EmittedEventRecorder: Sendable {
     }
 
     /// A controller for these options, writing state into `stateDirectory`.
-    func makeController(options: AutocaptureOptions, stateDirectory: URL) -> AutocaptureController {
+    func makeController(
+        options: AutocaptureOptions,
+        stateDirectory: URL,
+        sessionMode: SessionMode = .activation,
+        crashReasonRedaction: CrashReasonRedaction = .verbatim
+    ) -> AutocaptureController {
         AutocaptureController(
             options: options,
             stateDirectory: stateDirectory,
+            sessionMode: sessionMode,
+            crashReasonRedaction: crashReasonRedaction,
             emit: { [self] eventName, properties, occurredAt, sessionID in
                 recorded.withLock { state in
                     state.events.append(EmittedEvent(eventName: eventName, properties: properties, occurredAt: occurredAt, sessionID: sessionID))

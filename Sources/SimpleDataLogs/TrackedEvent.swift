@@ -8,7 +8,7 @@ struct TrackedEvent: Sendable, Equatable {
     /// The per-event UUID that makes retries safe to dedupe.
     let eventID: UUID
 
-    /// When the host app called `track`.
+    /// When the host app called `track`, or the past moment it passed.
     let occurredAt: Date
 
     /// The anonymous device id, when the host set one.
@@ -22,6 +22,28 @@ struct TrackedEvent: Sendable, Equatable {
 
     /// The `ts` layout: ISO 8601 in UTC with millisecond precision, e.g. `2026-10-12T09:14:03.120Z`.
     static let timestampStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true, timeZone: .gmt)
+
+    /// The oldest `ts` accepted: 3,650 days, safely inside the ingest API's 10-year limit.
+    static let maxTimestampAge: TimeInterval = 3_650 * 24 * 60 * 60
+
+    /// The time to stamp for a caller's timestamp: nil means now, the future is clamped to now, and nil comes back when it is too old.
+    static func resolvedTimestamp(_ requestedTimestamp: Date?, now: Date = Date()) -> Date? {
+        guard let requestedTimestamp else {
+            return now
+        }
+
+        // A clock running ahead (or a typo) cannot date an event after it was tracked.
+        guard requestedTimestamp <= now else {
+            return now
+        }
+
+        // Ingest would file anything older than its window under Unparsed, so it is refused here.
+        guard now.timeIntervalSince(requestedTimestamp) <= maxTimestampAge else {
+            return nil
+        }
+
+        return requestedTimestamp
+    }
 
     /// Stamps a new event, letting the event's own properties win over the defaults.
     static func make(

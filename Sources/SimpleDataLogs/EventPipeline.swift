@@ -1,3 +1,4 @@
+import os
 import Foundation
 
 /// The commands the facade sends to the pipeline, processed strictly in call order.
@@ -11,8 +12,11 @@ enum PipelineCommand: Sendable {
     /// Turn collection on or off; off also deletes every unsent event.
     case setEnabled(Bool)
 
-    /// Seal and send now, then resume the continuation, if any, when that attempt ends.
-    case flush(CheckedContinuation<Void, Never>?)
+    /// Seal and send now, then call the completion, if any, when that attempt ends.
+    case flush(completion: (@Sendable () -> Void)?)
+
+    /// Send what is queued (within the time limit), then turn collection off and delete whatever is left.
+    case flushAndDisable(timeLimit: Duration, completion: (@Sendable () -> Void)?)
 
     /// Signal the semaphore once every earlier command is applied, so termination can wait for the journal.
     case journalBarrier(DispatchSemaphore)
@@ -89,6 +93,9 @@ actor EventPipeline {
     /// Identifies the newest send loop, so a cancelled one never clears its replacement.
     private var sendLoopGeneration = 0
 
+    /// Bumped on every on/off change, so a slow flush-then-disable never undoes a later opt-in.
+    private var enabledStateGeneration = 0
+
     /// Wires the pipeline to its outbox folder and session; nothing touches disk or network until `start()`.
     init(
         configuration: PipelineConfiguration,
@@ -140,11 +147,18 @@ actor EventPipeline {
             onTrackHandled()
         case .setEnabled(let shouldEnable):
             setEnabled(shouldEnable)
-        case .flush(let flushContinuation):
+        case .flush(let completion):
             // A flush awaits the network, so it runs beside the command loop; it may also pick up events queued after it, which is harmless.
             Task {
                 await self.flush()
-                flushContinuation?.resume()
+                completion?()
+            }
+        case .flushAndDisable(let timeLimit, let completion):
+            // Every earlier event is journaled by now; the send runs beside the command loop, like a flush.
+            let drainGeneration = enabledStateGeneration
+            Task {
+                await self.flushAndDisable(timeLimit: timeLimit, drainGeneration: drainGeneration)
+                completion?()
             }
         case .journalBarrier(let barrierSemaphore):
             // Commands apply synchronously and in order, so every earlier event is already in the journal.
@@ -227,6 +241,7 @@ actor EventPipeline {
         }
 
         isEnabled = shouldEnable
+        enabledStateGeneration += 1
 
         // Turning collection back on needs nothing more; the next event starts a new batch.
         guard !shouldEnable else {
@@ -249,6 +264,69 @@ actor EventPipeline {
 
         sealJournalAndSend()
         await sendTask?.value
+    }
+
+    /// Sends everything queued within `timeLimit`, ignoring any backoff, then disables and deletes what is left.
+    func flushAndDisable(timeLimit: Duration, drainGeneration: Int? = nil) async {
+        let drainGeneration = drainGeneration ?? enabledStateGeneration
+
+        // A last attempt does not wait out a backoff; a 401 pause still holds, since the key is known bad.
+        if isBackingOff {
+            retryTimerTask?.cancel()
+            retryTimerTask = nil
+            isBackingOff = false
+        }
+
+        // Race the flush against the time limit; whichever ends first lets the disable go ahead.
+        await Self.waitForFirstToFinish(
+            {
+                await self.flush()
+            },
+            {
+                try? await Task.sleep(for: timeLimit)
+            }
+        )
+
+        // An opt-in or opt-out since the call came in wins over this late disable.
+        guard enabledStateGeneration == drainGeneration else {
+            return
+        }
+
+        // Stop sending and delete whatever did not make it.
+        setEnabled(false)
+    }
+
+    /// Returns as soon as either piece of work finishes, cancelling the other; unlike a task group, it never waits for the slower one.
+    private static func waitForFirstToFinish(_ firstWork: @escaping @Sendable () async -> Void, _ secondWork: @escaping @Sendable () async -> Void) async {
+        let hasResumed = OSAllocatedUnfairLock(initialState: false)
+        let racingTasks = OSAllocatedUnfairLock<[Task<Void, Never>]>(initialState: [])
+
+        await withCheckedContinuation { (raceContinuation: CheckedContinuation<Void, Never>) in
+            // Only the first finisher resumes the caller and cancels the rest.
+            let finishRace: @Sendable () -> Void = {
+                let isFirstFinisher = hasResumed.withLock { hasResumed in
+                    defer { hasResumed = true }
+                    return !hasResumed
+                }
+
+                guard isFirstFinisher else {
+                    return
+                }
+
+                racingTasks.withLock { tasks in tasks }.forEach { racingTask in racingTask.cancel() }
+                raceContinuation.resume()
+            }
+
+            let startedTasks = [firstWork, secondWork].map { work in
+                Task {
+                    await work()
+                    finishRace()
+                }
+            }
+            racingTasks.withLock { tasks in
+                tasks = startedTasks
+            }
+        }
     }
 
     /// Cancels every timer and any in-flight send, and forgets backoff and 401 state.

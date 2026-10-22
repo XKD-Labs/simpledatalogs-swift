@@ -2,6 +2,23 @@
 
 All notable changes to the SimpleDataLogs Swift package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - Unreleased
+
+### Added
+
+- `track(_:properties:at:eventID:)` sends an event dated in the past, up to 3,650 days back; a future time is sent as now.
+- `track(_:properties:eventID:)` and the `eventID:` argument let you pass your own `event_id`.
+- `flushAndDisable(timeLimit:)` (async and callback forms) sends what is queued, then turns collection off and deletes the rest.
+- `disable()`, the same as `setEnabled(false)`.
+- `sessionMode: .inactivityTimeout(minutes:)` on `configure`, for menu-bar and accessory apps: sessions follow `track` calls instead of app activation.
+- `crashReasonRedaction:` on `configure`; `.standard` strips numbers, paths and emails from crash reasons and cuts them at 200 characters.
+
+### Changed
+
+- File paths in `app_crashed` stack frames are cut to the file or module name.
+- On quit, the SDK now also sends the last events, holding termination for at most 2 s in total; before, they waited for the next launch.
+- On iOS, the background flush asks for background time, for at most 20 s.
+
 ## [0.3.0] - Unreleased
 
 The first public release.
