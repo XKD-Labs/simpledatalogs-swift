@@ -15,6 +15,7 @@ All notable changes to the SimpleDataLogs Swift package. The format follows [Kee
 
 ### Changed
 
+- A partial batch now goes out 5 s after its first event in debug builds and 10 s in release, instead of 30 s, so new events show on the dashboard within seconds.
 - File paths in `app_crashed` stack frames are cut to the file or module name.
 - On quit, the SDK now also sends the last events, holding termination for at most 2 s in total; before, they waited for the next launch.
 - On iOS, the background flush asks for background time, for at most 20 s.

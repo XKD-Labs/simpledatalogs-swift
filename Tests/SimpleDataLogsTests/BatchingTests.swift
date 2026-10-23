@@ -5,6 +5,11 @@ import Foundation
 
 /// Batches go out at 50 events or after the batch interval, and every request stays under the byte limit.
 final class BatchingTests: PipelineTestCase {
+    /// Debug builds, which tests are, send a partial batch after 5 s; release builds wait 10 s.
+    func testDebugBuildsSendAPartialBatchAfterFiveSeconds() {
+        XCTAssertEqual(PipelineConfiguration.defaultBatchInterval, .seconds(5))
+    }
+
     /// The 50th event seals and sends a batch without waiting for the timer.
     func testFiftyEventsSendOneBatchWithoutWaitingForTheTimer() async {
         let server = makeServer()

@@ -140,7 +140,7 @@ The opt-out is not persisted by the SDK; your app's own setting is the source of
 
 ## How it behaves
 
-- **Batching.** Events go out in batches of 50, or 30 s after the first event of a partial batch. Every request is under 256 KB.
+- **Batching.** Events go out in batches of 50, or after the first event of a partial batch has waited 5 s in debug builds (10 s in release). Every request is under 256 KB.
 - **Crash-safe outbox.** Each event is appended to a journal on disk as it is tracked.
   - Batches are sealed into files and deleted only after a `202`.
   - The next launch resends anything left over, including a journal cut short by a crash.

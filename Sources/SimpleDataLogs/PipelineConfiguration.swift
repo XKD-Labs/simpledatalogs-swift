@@ -2,6 +2,15 @@ import Foundation
 
 /// Every tunable the pipeline reads; the defaults follow the ingest API, and tests shrink them.
 struct PipelineConfiguration: Sendable {
+    /// 5 s in debug builds, so a new event shows within seconds; 10 s in release, to spare battery and requests.
+    static var defaultBatchInterval: Duration {
+        #if DEBUG
+        .seconds(5)
+        #else
+        .seconds(10)
+        #endif
+    }
+
     /// The full ingest URL, `<endpoint>/v1/ingest`.
     var ingestURL: URL
 
@@ -15,7 +24,7 @@ struct PipelineConfiguration: Sendable {
     var maxBatchEventCount = 50
 
     /// Seal and send a partial batch this long after its first event.
-    var batchInterval: Duration = .seconds(30)
+    var batchInterval: Duration = PipelineConfiguration.defaultBatchInterval
 
     /// The largest request body ever sent, safely under the 256 KB the ingest API allows.
     var maxRequestBytes = 256_000
