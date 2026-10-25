@@ -2,7 +2,7 @@
 
 All notable changes to the SimpleDataLogs Swift package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-10-26
 
 ### Added
 
@@ -21,7 +21,7 @@ All notable changes to the SimpleDataLogs Swift package. The format follows [Kee
 - On quit, the SDK now also sends the last events, holding termination for at most 2 s in total; before, they waited for the next launch.
 - On iOS, the background flush asks for background time, for at most 20 s.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-10-19
 
 The first public release.
 
