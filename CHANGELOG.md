@@ -11,6 +11,7 @@ All notable changes to the SimpleDataLogs Swift package. The format follows [Kee
 - `flushAndDisable(timeLimit:)` (async and callback forms) sends what is queued, then turns collection off and deletes the rest.
 - `disable()`, the same as `setEnabled(false)`.
 - `sessionMode: .inactivityTimeout(minutes:)` on `configure`, for menu-bar and accessory apps: sessions follow `track` calls instead of app activation.
+- Every event tracked now carries `app_state` (`active` or `background`) and, while the app is in front, `engaged_ms`, so dashboards can split active and passive sessions. On macOS, input in the last 10 seconds counts as active. `activity: .off` on `configure` turns it off.
 - `crashReasonRedaction:` on `configure`; `.standard` strips numbers, paths and emails from crash reasons and cuts them at 200 characters.
 
 ### Changed

@@ -23,6 +23,9 @@ public enum SimpleDataLogs: Sendable {
 
     // MARK: - Public API
 
+    /// The activity monitor that stamps `app_state` and `engaged_ms`, once `configure` starts it.
+    private static let activityMonitor = OSAllocatedUnfairLock<ActivityMonitor?>(initialState: nil)
+
     /// The running autocapture, kept for the life of the process once `configure` turns it on.
     private static let autocaptureController = OSAllocatedUnfairLock<AutocaptureController?>(initialState: nil)
 
@@ -32,7 +35,8 @@ public enum SimpleDataLogs: Sendable {
         endpoint: URL = defaultEndpoint,
         autocapture: AutocaptureOptions = [],
         sessionMode: SessionMode = .activation,
-        crashReasonRedaction: CrashReasonRedaction = .verbatim
+        crashReasonRedaction: CrashReasonRedaction = .verbatim,
+        activity: ActivityReporting = .automatic
     ) {
         // Trim copy-paste whitespace, and warn about a key that cannot work in an app.
         let trimmedIngestKey = ingestKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -76,6 +80,12 @@ public enum SimpleDataLogs: Sendable {
         // Flush when the app terminates, the Mac sleeps, or an iOS app moves to the background.
         LifecycleFlushObserver.startObserving { lifecycleMoment in
             handleLifecycleMoment(lifecycleMoment)
+        }
+
+        // Events say whether someone was using the app, unless the host turned it off.
+        if activity == .automatic {
+            let monitor = ActivityMonitor()
+            activityMonitor.withLock { runningMonitor in runningMonitor = monitor }
         }
 
         // Opt-in autocapture: launches, sessions and crashes, as asked.
@@ -125,9 +135,14 @@ public enum SimpleDataLogs: Sendable {
         }
 
         // An event happening now is session activity in inactivity-timeout mode; a back-dated one is not.
-        if requestedTimestamp == nil, facadeState.withLock({ state in state.isEnabled }) {
+        let isHappeningNow = requestedTimestamp == nil && facadeState.withLock { state in state.isEnabled }
+        if isHappeningNow {
             runningAutocaptureController()?.recordTrackActivity(at: occurredAt)
         }
+
+        // An event happening now says whether someone was using the app; the caller's own app_state wins.
+        let activityProperties = isHappeningNow ? runningActivityMonitor()?.stamp(at: occurredAt) ?? [:] : [:]
+        let stampedProperties = activityProperties.merging(validProperties) { _, callerValue in callerValue }
 
         // Queue it in call order, within the pending-track cap, with the caller's event_id or a fresh one.
         let resolvedEventID = eventID ?? UUID()
@@ -138,7 +153,7 @@ public enum SimpleDataLogs: Sendable {
 
             let event = TrackedEvent.make(
                 eventName: eventName,
-                properties: validProperties,
+                properties: stampedProperties,
                 defaultProperties: state.defaultProperties,
                 deviceID: state.deviceID,
                 sessionID: state.sessionID,
@@ -185,6 +200,11 @@ public enum SimpleDataLogs: Sendable {
         facadeState.withLock { state in
             state.sessionID = sessionID
         }
+    }
+
+    /// The activity monitor, once `configure` started one.
+    private static func runningActivityMonitor() -> ActivityMonitor? {
+        activityMonitor.withLock { runningMonitor in runningMonitor }
     }
 
     /// The autocapture controller, once `configure` started one.

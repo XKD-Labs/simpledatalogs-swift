@@ -85,7 +85,16 @@ SimpleDataLogs.configure(ingestKey: "sdl_pub_…", autocapture: .all, crashReaso
 - Pick parts with `CrashReasonRedaction(shouldStripNumbers:shouldStripPaths:shouldStripEmails:maxLength:)`.
 - File paths in `stack` frames are always cut to the file or module name, in every mode.
 
-- **Screen views** are opt-in per screen: `.trackScreenView("Settings")` on a SwiftUI view, or `SimpleDataLogs.trackScreen("Settings")` from UIKit/AppKit. Both send `screen_view` with a `screen` prop.
+### Active and background
+
+Every event tracked now says whether someone was using the app, so the dashboard can tell active sessions from passive ones:
+
+- `app_state` is `active` while the app is in front, or on a Mac when there was keyboard or mouse input in the last 10 seconds (a menu-bar hotkey counts); otherwise `background`.
+- `engaged_ms` is the time the app spent in front since the previous event.
+- Mark background work yourself with `track("sync_finished", properties: ["app_state": "background"])`; your value wins.
+- Turn it off with `configure(ingestKey: …, activity: .off)`. Back-dated events carry neither.
+
+ `.trackScreenView("Settings")` on a SwiftUI view, or `SimpleDataLogs.trackScreen("Settings")` from UIKit/AppKit. Both send `screen_view` with a `screen` prop.
 - Swift runtime traps (`fatalError`, force unwraps) and signals are not `NSException`s, so they are not captured.
 - The opt-out applies: with `setEnabled(false)`, nothing is captured and a saved crash is discarded.
 
